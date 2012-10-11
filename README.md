@@ -1,4 +1,4 @@
-python-example
-==============
+Python sample for Nimble API
+============================
 
-Python examples
+Simple python client, demonstrating basic usage of Nimble API. Requires Tornado.
