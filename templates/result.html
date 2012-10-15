@@ -2,16 +2,16 @@
         "http://www.w3.org/TR/html4/loose.dtd">
 <html>
 <head>
-    <title>Request results</title>
+    <title>Our results!</title>
 </head>
 <body>
-    You've logged it. May be <a href="/logout/">logout</a>?
-    <h2>Recently contacted persons</h2>
-    <table>
-        <tr><th>ID</th><th>First Name</th><th>Last Name</th></tr>
-        {% for person in data %}
-            <tr><td>{{ escape(person['id']) }}</td><td>{{ escape(person['fn']) }}</td><td>{{ escape(person['ln']) }}</td></tr>
-        {% end %}
-    </table>
+{{ escape(user) }}, you've logged it. May be <a href="/oauth/logout">logout</a>?
+<h2>Recently viewed persons</h2>
+<table>
+    <tr><th>ID</th><th>First Name</th><th>Last Name</th></tr>
+    {% for person in data %}
+    <tr><td>{{ escape(person['id']) }}</td><td>{{ escape(person['fn']) }}</td><td>{{ escape(person['ln']) }}</td></tr>
+    {% end %}
+</table>
 </body>
 </html>

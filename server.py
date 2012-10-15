@@ -1,206 +1,218 @@
-from json import loads
-from os.path import realpath, split, join
-from traceback import format_exc
+import logging
+import os.path
 from urllib import urlencode
 
-from tornado.httpclient import HTTPRequest, HTTPClient, HTTPError
-from tornado.httpserver import HTTPServer
-from tornado.ioloop import IOLoop
-from tornado.template import Loader
-from tornado.web import RequestHandler, Application
+import tornado.auth
+import tornado.escape
+import tornado.gen
+import tornado.httpclient
+import tornado.httpserver
+import tornado.ioloop
+import tornado.options
+import tornado.web
+from tornado.options import define, options
 
-# main application parameters, received from developer portal
-_APP_KEY = 'PLACE YOUR APP KEY'
-_SECRET_KEY = 'PLACE YOUR APP SECRET'
-_PINGBACK_URL = 'YOUR PINGBACK URL'
 
-def _make_slashes(in_str):
+define("port", default=9000, help="run on the given port", type=int)
+define("nimble_api_key", help="your Nimble application API key",
+    default="f0bd4535a1298d99a4f8afa4ba02324d")
+define("nimble_secret", help="your Nimble application secret",
+    default="63f5b885039a1914")
+define("redirect_url", help="redirect URL of your app",
+    default="http://localhost:9000/oauth/login")
+
+##### Nimble-specific classes
+class NimbleHandler(tornado.web.RequestHandler, tornado.auth.OAuth2Mixin):
     """
-    Ensure that in_str starts and ends with single slash
-    :param in_str: string to add slashes
-    :type in_str: str or unicode
-    :return: string with slashes
-    :rtype: str or unicode
+    Nimble's custom OAuth2 handler for authenticating users with their Nimble accounts and receiving tokens
     """
-    return ('/%s/' % in_str).replace('//', '/')
+    _OAUTH_ACCESS_TOKEN_URL = "https://api.nimble.com/oauth/token?"
+    _OAUTH_AUTHORIZE_URL = "https://api.nimble.com/oauth/authorize?"
+    _OAUTH_REQUEST_URL = "https://api.nimble.com/"
 
-class OurHandler(RequestHandler):
-    """
-    We have some utility functions, so move them to base class for Request handlers
-    """
-    @property
-    def template_loader(self):
+    @tornado.gen.engine
+    def get_authenticated_user(self, callback):
         """
-        Return instance of template Loader, loading templates from current <current directory>/templates
-        :return: template Loader
-        :rtype: Loader
+        Handle redirect from Nimble after successful OAuth
         """
-        if not hasattr(self, '_loader'):
-            path = split(realpath(__file__))[0]
-            tmp_path = join(path, 'templates')
-            self._loader = Loader(tmp_path)
-        return self._loader
+        code = self.get_argument("code", None)
+        if not code:                                # if no code supplied
+            logging.warning('Got no key')
+            callback(None)
 
-    def make_nimble_request(self, api_path, token, method="GET", **kwargs):
-        """
-        Make request to existing nimble APIs
-        :param api_path: API URL, e.g. api/v1/contacts/list
-        :type api_path: str
-        :param token: access token
-        :type token: str
-        :param method: desired HTTP request method
-        :type method: str
-        :param kwargs: all other request parameters
-        :type kwargs: dict
-        :return: dict with received data or None on error
-        :rtype: dict or NoneType
-        """
-        try:
-            params = kwargs.copy()
-            # adding access token to future request
-            params['access_token'] = token
-            data = urlencode(params)
-            path = _make_slashes(api_path)
-            url = ''
-            # build request
-            if method=='GET':
-                url = 'https://api.nimble.com%s?%s' % (path, data)
-                request = HTTPRequest(url)
-            elif method=='POST':
-                url = 'https://api.nimble.com%s' % path
-                request = HTTPRequest(url)
-            else: # if no such method
-                raise ValueError('Invalid method %r' % method)
-
-            print('Going to request %s' % url)
-            http_client = HTTPClient()
-            response = http_client.fetch(request)
-            return loads(response.body)
-        except HTTPError as ex:
-            print('Error %d' % ex.code)
-            return None
-        except Exception:
-            print('Error getting code %s' % format_exc())
-            return None
-
-
-class IndexHandler(OurHandler):
-    def get(self, *args, **kwargs):
-        """
-        Simple main page handler. If we have token, saved in cookie - make request and show result
-        If no token - show page, suggesting login
-        """
-        token = self.get_secure_cookie('nimble_token')
-        if token:
-            data = self.make_nimble_request('api/v1/contacts/list', token, sort='recently viewed:asc',
-                fields='first name,last name')
-            if data:
-                result = []
-                for rec in data.get('resources', []):
-                    fields = rec.get('fields', {})
-                    fn = fields['first name'][0]['value'] if 'first name' in fields else ''
-                    ln = fields['last name'][0]['value'] if 'last name' in fields else ''
-                    result.append({'id': rec.get('id'), 'fn': fn, 'ln': ln})
-                self.write(self.template_loader.load('result.html').generate(data=result))
-        else:
-            self.write(self.template_loader.load('index.html').generate(message='No token found, please log in'))
-
-
-class OAuthHandler(OurHandler):
-    def _get_acess_token(self, security_code):
-        """
-        After OAuth Apigee returns us security code, and to obtain token we need to make additional request
-        This function trying to make this request, and return token
-        :param security_code: security code, obtained from Apigee
-        :type security_code: str
-        :return: token on success or None on error
-        :rtype: str or NoneType
-        """
-        try:
-            # additional headers to get response as JSON, not as XML
-            our_headers = {
-                'Accept': 'application/json',
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            }
-            our_params = {
-                'client_id': _APP_KEY,
-                'code': security_code,
-                'grant_type': 'authorization_code',
-                'client_secret': _SECRET_KEY,
-            }
-            request = HTTPRequest('https://api.nimble.com/oauth/token', method='POST', headers=our_headers,
-                body=urlencode(our_params))
-            http_client = HTTPClient()
-            response = http_client.fetch(request)
-            if response.code==200:
-                data = loads(response.body)
-                return data.get('access_token')
-            else:
-                print('Got incorrect response code %d:\n%s' % (response.code, response.body))
-        except HTTPError as ex:
-            print('Error %d, message %s' % (ex.code, ex.response.body))
-        except Exception:
-            print('Error getting code %s' % format_exc())
-            return None
-
-    def get(self, *args, **kwargs):
-        """
-        OAuth handler
-        If no additional parameters passed, then it's first call to this handler, we need to redirect user to log in
-        page.
-        If we receive "error" or "code" parameters - then it's a callback from oauth server, and we're handling this
-        situation.
-        "code" parameter passed on correct authorisation
-        "error" passed on fail
-        """
-        error = self.get_argument('error', None)
-        if error:
-            # Apigee sends more verbose description of error in parameter error_description, we're trying to obtain it
-            # and show to user
-            err_descr = self.get_argument('error_description', None)
-            error_msg = err_descr if err_descr is not None else error
-            self.write(self.template_loader.load('index.html').generate(message=repr(error_msg)))
+        # make a request to obtain token by code
+        http = tornado.httpclient.AsyncHTTPClient()
+        req_url = self._oauth_request_token_url(client_id=self.settings["nimble_api_key"], code=code,
+            client_secret=self.settings["nimble_secret"], extra_params={"grant_type": "authorization_code"})
+        our_headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        }
+        request = tornado.httpclient.HTTPRequest(
+            req_url, headers=our_headers,
+        )
+        # fetch token
+        response = yield tornado.gen.Task(http.fetch, request)
+        if response.error:
+            logging.warning("Error response %s fetching %s", response.error, response.request.url)
+            callback(None)
             return
 
-        code = self.get_argument('code', None)
-        if code:
-            # we've got access code, but additional call required to obtain token
-            token = self._get_acess_token(code)
-            if token is not None:
-                self.set_secure_cookie('nimble_token', token)
-                self.write(self.template_loader.load('success.html').generate())
-                return
+        token = tornado.escape.json_decode(response.body) if response else None
+
+        if token is None:
+            logging.warning("access_token is broken")
+            callback(None)
+            return
+
+        callback(token)
+
+    @tornado.gen.engine
+    def nimble_request(self, callback, api_path, method=u'GET', access_token=None, body=None, **kwargs):
+        """
+        Make async request to Nimble API
+        :param callback: callback to pass results
+        :type callback: func
+        :param api_path: path to required API
+        :type api_path: unicode
+        :param method: HTTP method to use, default - GET
+        :type method: unicode
+        :param access_token: API access token, if passed explicitly. If this parameter is omitted - function will try
+            to get token from currently logged user info
+        :type access_token: str or unicode
+        :param body: HTTP request body for POST request, default - None
+        :type body: str or NoneType
+        :return: None
+        :rtype: NoneType
+        """
+        if access_token is None:
+            user = self.get_current_user()
+            if isinstance(user, dict) and 'access_token' in user:
+                access_token = user['access_token']
             else:
-                print('Got no token')
-                self.redirect('/')
+                logging.warning("Access token required")
+                callback(None)
                 return
-        # here we process first call to this hanlder. We form redirect url and send user there to authorise
-        redirect_url = "https://api.nimble.com/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code" % (
-            _APP_KEY, _PINGBACK_URL)
-        self.redirect(redirect_url)
+
+        args = {"access_token": access_token}
+
+        if kwargs:
+            args.update(kwargs)
+
+        url = 'https://api.nimble.com%s?%s' % (api_path, urlencode(args))
+        request = tornado.httpclient.HTTPRequest(url, method, body=body)
+
+        http = tornado.httpclient.AsyncHTTPClient()
+        response = yield tornado.gen.Task(http.fetch, request)
+
+        if response.error:
+            logging.warning("Error response %s fetching %s", response.error, response.request.url)
+            callback(None)
+            return
+        data = tornado.escape.json_decode(response.body) if response else None
+        callback(data)
+
+    def get_current_user(self):
+        """
+        Get current user info, by default stored in "nimble_user" secure cookie
+        """
+        user_json = self.get_secure_cookie("nimble_user")
+        if not user_json: return None
+        return tornado.escape.json_decode(user_json)
 
 
-class LogoutHandler(OurHandler):
+class NimbleLoginHandler(NimbleHandler):
     """
-    Handle logout: clear cookie
+    Handler for OAuth login
     """
-    def get(self, *args, **kwargs):
-        self.clear_all_cookies()
-        self.redirect('/')
+    @tornado.web.asynchronous
+    @tornado.gen.engine
+    def get(self):
+        # if we got "code" parameter, then it's callback from Nimble OAuth server
+        # get user data and store it
+        if self.get_argument("code", None):
+            user = yield tornado.gen.Task(self.get_authenticated_user)
+            # store login user data
+            self.set_secure_cookie("nimble_user", tornado.escape.json_encode(user))
+            if not user:
+                raise tornado.web.HTTPError(500, "Nimble auth failed")
+            self.redirect("/")
+        # if we need to handle OAuth errors, here we should check for "error" command line parameter
+        else:
+        # it's first call to handler, or we got error - redirect user back to Nimble API
+            self.authorize_redirect(redirect_uri=self.settings["redirect_url"],
+                client_id=self.settings["nimble_api_key"],
+                extra_params={"response_type": "code", "scope": "testApp"})
 
 
-application = Application([
-    (r"/oauth/?", OAuthHandler),
-    (r"/logout/?", LogoutHandler),
-    (r"/", IndexHandler),
-], cookie_secret="k2bJr0E*Hiehuq15PLo6p3SF4>9TBj;c", debug=True) # cookie secret must be good random str
+class NimbleLogoutHandler(tornado.web.RequestHandler):
+    """
+    Handler for OAuth log out
+    """
+    def get(self):
+        self.clear_cookie("nimble_user")
+        self.write('You are now logged out. '
+                   'Click <a href="/">here</a> to log back in.')
 
-def start_server(port, prefork=True, num_processes=0):
-    print("start_server(): starting on port %d, prefork=%s, num_processes=%d" % (port, prefork, num_processes))
 
-    http_server = HTTPServer(application)
-    http_server.listen(port)
-    IOLoop.instance().start()
+class Application(tornado.web.Application):
+    """
+    Basic class for sample application with configuration
+    """
+    def __init__(self):
+        handlers = [
+            (r"/", MainHandler),
+            (r"/oauth/login/?", NimbleLoginHandler),
+            (r"/oauth/logout/?", NimbleLogoutHandler),
+            ]
+        settings = {
+            "cookie_secret": "k2bJr0E*Hiehuq15PLo6p3SF4>9TBj;c", # fairly random string, generate yours for usage
+            "login_url": "/oauth/login",
+            "template_path": os.path.join(os.path.dirname(__file__), "templates"),
+            "static_path": os.path.join(os.path.dirname(__file__), "static"),
+            "xsrf_cookies": True,
+            "nimble_api_key": options.nimble_api_key,  # three values below should be set
+            "nimble_secret": options.nimble_secret,
+            "redirect_url": options.redirect_url,
+            "debug": True,
+            "autoescape": None,
+            }
+        tornado.web.Application.__init__(self, handlers, **settings)
 
-if __name__ == '__main__':
-    start_server(9000)
+
+class MainHandler(NimbleHandler):
+    """
+    Small example of usage for classes above: log in via Nimble and get recently viewed contacts
+    """
+    @tornado.web.authenticated
+    @tornado.web.asynchronous
+    @tornado.gen.engine
+    def get(self):
+        # get recently viewed data
+        # usage of tornado.gen - greatly simplifies chains of async calls
+        self.nimble_request((yield tornado.gen.Callback("get-recently-viewed")),
+                            u'/api/v1/contacts/list', sort=u'recently viewed:asc', fields=u'first name,last name')
+
+        data = yield tornado.gen.Wait("get-recently-viewed")
+        # get user name to show in template
+        name = tornado.escape.xhtml_escape(self.current_user['access_token'])
+        result = []
+        # parse data, received from Nimble
+        if data:
+            for rec in data.get('resources', []):
+                fields = rec.get('fields', {})
+                fn = fields['first name'][0]['value'] if 'first name' in fields else ''
+                ln = fields['last name'][0]['value'] if 'last name' in fields else ''
+                result.append({'id': rec.get('id'), 'fn': fn, 'ln': ln})
+
+        self.render('result.html', user=name, data=result)
+
+
+def main():
+    tornado.options.parse_command_line()
+    http_server = tornado.httpserver.HTTPServer(Application())
+    http_server.listen(options.port)
+    tornado.ioloop.IOLoop.instance().start()
+
+if __name__ == "__main__":
+    main()
