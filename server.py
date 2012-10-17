@@ -1,3 +1,11 @@
+#!/usr/bin/env python
+#
+# Copyright 2012 Nimble
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 import logging
 import os.path
 from urllib import urlencode
@@ -15,9 +23,9 @@ from tornado.options import define, options
 
 define("port", default=9000, help="run on the given port", type=int)
 define("nimble_api_key", help="your Nimble application API key",
-    default="f0bd4535a1298d99a4f8afa4ba02324d")
+    default="4550f11d2af4f3d74349767a552b4859")
 define("nimble_secret", help="your Nimble application secret",
-    default="63f5b885039a1914")
+    default="1ea5c1ddc6f020b9")
 define("redirect_url", help="redirect URL of your app",
     default="http://localhost:9000/oauth/login")
 
@@ -64,6 +72,14 @@ class NimbleHandler(tornado.web.RequestHandler, tornado.auth.OAuth2Mixin):
             logging.warning("access_token is broken")
             callback(None)
             return
+
+        # Make request to API to get current logged user info, using freshly-obtained token.
+        # NB: this API call well be changed in future
+        self.nimble_request((yield tornado.gen.Callback("get-user-data")), u"/api/users/myself/",
+            access_token=token['access_token'])
+        user_data = yield tornado.gen.Wait("get-user-data")
+        if user_data:
+            token.update(user_data)
 
         callback(token)
 
@@ -195,7 +211,7 @@ class MainHandler(NimbleHandler):
 
         data = yield tornado.gen.Wait("get-recently-viewed")
         # get user name to show in template
-        name = tornado.escape.xhtml_escape(self.current_user['access_token'])
+        name = tornado.escape.xhtml_escape(self.current_user['name'])
         result = []
         # parse data, received from Nimble
         if data:
